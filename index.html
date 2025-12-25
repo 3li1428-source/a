@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>نظام المتابعة المدرسي</title>
+    
+    <!-- المكتبات الأساسية -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap');
+        body { font-family: 'Tajawal', sans-serif; background-color: #f0fdfa; -webkit-tap-highlight-color: transparent; }
+        ::-webkit-scrollbar { width: 0px; }
+        
+        @media print {
+            body * { visibility: hidden; }
+            #printable-area, #printable-area * { visibility: visible; }
+            #printable-area { position: absolute; left: 0; top: 0; width: 100%; background: white; padding: 20px; direction: rtl; }
+            .no-print { display: none !important; }
+        }
+
+        .stat-card { transition: transform 0.2s; }
+        .stat-card:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<!-- شاشة الخطأ الاحتياطية -->
+<div id="error-screen" style="display:none; padding:20px; text-align:center; color:red;">
+    <h2>حدث خطأ أثناء التشغيل</h2>
+    <p id="error-msg"></p>
+    <button onclick="localStorage.clear(); location.reload()" style="padding:10px; background:#e53e3e; color:white; border:none; border-radius:5px; margin-top:10px;">إعادة ضبط التطبيق</button>
+</div>
+
+<script>
+    window.onerror = function(msg) {
+        document.getElementById('root').style.display = 'none';
+        document.getElementById('error-screen').style.display = 'block';
+        document.getElementById('error-msg').innerText = msg;
+    };
+</script>
+
+<script type="text/babel">
+
+    const { useState, useEffect, useRef } = React;
+
+    function App() {
+        // --- إدارة البيانات ---
+        const loadData = (key, def) => {
+            try {
+                const val = localStorage.getItem(key);
+                return val ? JSON.parse(val) : def;
+            } catch { return def; }
+        };
+
+        const [schoolName, setSchoolName] = useState(() => localStorage.getItem('school_name') || 'اسم المدرسة');
+        const [teachers, setTeachers] = useState(() => loadData('school_teachers', [{ id: 1, name: "مثال: محمد أحمد", phone: "" }]));
+        const [records, setRecords] = useState(() => loadData('school_records', []));
+        const [accountabilityOptions, setAccountabilityOptions] = useState(() => loadData('school_acc_opts', ['لفت نظر', 'مساءلة', 'إنذار']));
+
+        // --- حفظ تلقائي ---
+        useEffect(() => localStorage.setItem('school_name', schoolName), [schoolName]);
+        useEffect(() => localStorage.setItem('school_teachers', JSON.stringify(teachers)), [teachers]);
+        useEffect(() => localStorage.setItem('school_records', JSON.stringify(records)), [records]);
+        useEffect(() => localStorage.setItem('school_acc_opts', JSON.stringify(accountabilityOptions)), [accountabilityOptions]);
+
+        // --- States ---
+        const [activeTab, setActiveTab] = useState('dashboard');
+        const [search, setSearch] = useState('');
+        const [filter, setFilter] = useState('all');
+        const [editRec, setEditRec] = useState(null);
+        const [printTeacher, setPrintTeacher] = useState(null);
+
+        // Entry Form
+        const [formTeacher, setFormTeacher] = useState('');
+        const [formType, setFormType] = useState('late');
+        const [formAcc, setFormAcc] = useState('');
+        const [formSession, setFormSession] = useState('1');
+        const [formMinutes, setFormMinutes] = useState('');
+        const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
+        const [formNotes, setFormNotes] = useState('');
+
+        // Settings
+        const [newName, setNewName] = useState('');
+        const [newPhone, setNewPhone] = useState('');
+        const [newAcc, setNewAcc] = useState('');
+        
+        // Messages
+        const [msgIds, setMsgIds] = useState([]);
+        const [msgTxt, setMsgTxt] = useState('');
+
+        const excelRef = useRef(null);
+
+        // --- Helpers ---
+        const hijriDate = (d) => {
+            try { return new Intl.DateTimeFormat('ar-SA', {calendar:'islamic-umalqura', dateStyle:'full'}).format(new Date(d)); }
+            catch { return d; }
+        };
+
+        const checkDate = (d) => {
+            const rd = new Date(d); const today = new Date(); today.setHours(0,0,0,0);
+            if(filter==='today') return rd.toDateString() === today.toDateString();
+            if(filter==='week') { const w = new Date(); w.setDate(today.getDate()-7); return rd >= w; }
+            if(filter==='month') return rd.getMonth()===today.getMonth() && rd.getFullYear()===today.getFullYear();
+            return true;
+        };
+
+        // --- Functions ---
+        const saveRecord = () => {
+            if(!formTeacher) return alert('اختر المعلم');
+            if((formType==='late' || formType==='permission') && !formMinutes) return alert('أدخل الدقائق/المدة');
+            
+            const newRec = {
+                id: Date.now(),
+                teacherId: parseInt(formTeacher),
+                type: formType,
+                sessionNumber: (formType==='late' || formType==='waiting') ? formSession : null,
+                minutes: (formType==='late' || formType==='permission') ? parseInt(formMinutes) : 0,
+                accountabilityType: formType==='accountability' ? formAcc || accountabilityOptions[0] : null,
+                date: formDate,
+                notes: formNotes
+            };
+            setRecords([newRec, ...records]);
+            setFormMinutes(''); setFormNotes('');
+            alert('تم الحفظ ✅');
+        };
+
+        const deleteRecord = (id) => { if(confirm('حذف؟')) setRecords(records.filter(r => r.id !== id)); };
+        
+        const updateRecord = () => {
+            if(!editRec) return;
+            setRecords(records.map(r => r.id === editRec.id ? editRec : r));
+            setEditRec(null);
+        };
+
+        const addTeacher = () => {
+            if(newName) {
+                setTeachers([...teachers, {id: Date.now(), name: newName, phone: newPhone}]);
+                setNewName(''); setNewPhone('');
+            }
+        };
+
+        const deleteTeacher = (id) => {
+            if(confirm('حذف المعلم؟')) {
+                setTeachers(teachers.filter(t => t.id !== id));
+                setRecords(records.filter(r => r.teacherId !== id));
+            }
+        };
+
+        const addAccType = () => {
+            if(newAcc && !accountabilityOptions.includes(newAcc)) {
+                setAccountabilityOptions([...accountabilityOptions, newAcc]);
+                setNewAcc('');
+            }
+        };
+
+        const deleteAccType = (opt) => {
+            if(confirm('حذف؟')) setAccountabilityOptions(accountabilityOptions.filter(o => o !== opt));
+        };
+
+        // --- WhatsApp ---
+        const openWa = (phone, msg) => {
+            if(!phone) return alert('لا يوجد رقم');
+            window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+        };
+
+        const sendRecWa = (r) => {
+            const t = teachers.find(x => x.id === r.teacherId);
+            if(!t) return;
+            const d = hijriDate(r.date);
+            let m = "";
+            if (r.type === 'late') m = `أستاذ ${t.name}،\nتأخر حصة (${r.sessionNumber}) لمدة ${r.minutes}د، يوم ${d}.`;
+            else if (r.type === 'absent') m = `أستاذ ${t.name}،\nنأسف لرصد غياب يوم ${d}.`;
+            else if (r.type === 'permission') m = `أستاذ ${t.name}،\nتم رصد استئذان ${r.minutes}د، يوم ${d}.`;
+            else if (r.type === 'assembly') m = `شكر وتقدير للأستاذ ${t.name} لحضور الطابور بتميز يوم ${d}.`;
+            else if (r.type === 'waiting') m = `أستاذ ${t.name}،\nلديك حصة انتظار (${r.sessionNumber})، يوم ${d}.`;
+            else if (r.type === 'supervision') m = `أستاذ ${t.name}،\nتذكير: لديك تكليف بالإشراف اليوم ${d}.`;
+            else if (r.type === 'duty') m = `أستاذ ${t.name}،\nتذكير: لديك تكليف بالمناوبة اليوم ${d}.`;
+            else if (r.type === 'accountability') m = `أستاذ ${t.name}،\nبخصوص الإجراء الإداري: ${r.accountabilityType}، بتاريخ ${d}.`;
+            
+            openWa(t.phone, m);
+        };
+
+        // --- Excel Export ---
+        const exportExcel = () => {
+            if(records.length === 0) return alert('لا يوجد سجلات');
+            
+            const data = records.map(r => {
+                const t = teachers.find(x => x.id === r.teacherId);
+                let typeName = '';
+                let details = '';
+                
+                if(r.type === 'late') { typeName='تأخر'; details=`حصة ${r.sessionNumber}`; }
+                else if(r.type === 'absent') typeName='غياب';
+                else if(r.type === 'permission') { typeName='استئذان'; details=`${r.minutes}د`; }
+                else if(r.type === 'waiting') { typeName='انتظار'; details=`حصة ${r.sessionNumber}`; }
+                else if(r.type === 'assembly') typeName='طابور';
+                else if(r.type === 'accountability') { typeName='إجراء'; details=r.accountabilityType; }
+                else if(r.type === 'supervision') typeName='إشراف';
+                else if(r.type === 'duty') typeName='مناوبة';
+
+                return {
+                    "الاسم": t ? t.name : "محذوف",
+                    "النوع": typeName,
+                    "التفاصيل": details,
+                    "الدقائق": r.minutes || 0,
+                    "التاريخ": hijriDate(r.date),
+                    "ميلادي": r.date,
+                    "ملاحظات": r.notes
+                };
+            });
+
+            const ws = XLSX.utils.json_to_sheet(data);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "التقرير");
+            XLSX.writeFile(wb, "Report.xlsx");
+        };
+
+        const handleExcelImport = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                try {
+                    const wb = XLSX.read(evt.target.result, { type: 'binary' });
+                    const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+                    let added = 0;
+                    for (let i = 1; i < data.length; i++) {
+                        const row = data[i];
+                        if (row[0]) {
+                            const name = row[0].toString();
+                            const phone = row[1] ? row[1].toString() : "";
+                            if (!teachers.find(t => t.name === name)) {
+                                setTeachers(prev => [...prev, { id: Date.now() + i, name, phone }]);
+                                added++;
+                            }
+                        }
+                    }
+                    alert(`تم استيراد ${added} معلم`);
+                } catch(err) {
+                    alert("خطأ في قراءة الملف");
+                }
+            };
+            reader.readAsBinaryString(file);
+            e.target.value = "";
+        };
+
+        // --- Printing ---
+        const handlePrint = (teacher) => {
+            setPrintTeacher(teacher);
+            setTimeout(() => { window.print(); setPrintTeacher(null); }, 500);
+        };
+
+        // --- Stats ---
+        const getStats = () => {
+            const fRecs = records.filter(r => checkDate(r.date));
+            return {
+                late: fRecs.filter(r => r.type === 'late').length,
+                absent: fRecs.filter(r => r.type === 'absent').length,
+                perm: fRecs.filter(r => r.type === 'permission').length,
+                wait: fRecs.filter(r => r.type === 'waiting').length,
+                assembly: fRecs.filter(r => r.type === 'assembly').length
+            };
+        };
+
+        const getTeacherStats = (tid) => {
+            const tr = records.filter(r => r.teacherId === tid && checkDate(r.date));
+            return {
+                late: tr.filter(r => r.type === 'late').length,
+                absent: tr.filter(r => r.type === 'absent').length,
+                waiting: tr.filter(r => r.type === 'waiting').length,
+                assembly: tr.filter(r => r.type === 'assembly').length
+            };
+        };
+
+        const stats = getStats();
+        const filteredTeachers = teachers.filter(t => t.name.includes(search));
+
+        const getTopLate = () => {
+            const month = new Date().getMonth();
+            const mr = records.filter(r => new Date(r.date).getMonth() === month && r.type === 'late');
+            const map = {};
+            mr.forEach(r => map[r.teacherId] = (map[r.teacherId] || 0) + (r.minutes || 0));
+            return Object.entries(map).sort(([,a],[,b]) => b-a).slice(0,3).map(([id,m]) => {
+                const t = teachers.find(x => x.id == id);
+                return {name: t ? t.name : '?', minutes: m};
+            });
+        };
+        const topLate = getTopLate();
+
+        // --- WhatsApp Logic ---
+        const selectAllTeachers = () => setMsgIds(msgIds.length===teachers.length?[]:teachers.map(t=>t.id));
+        const toggleTeacher = (id) => msgIds.includes(id)?setMsgIds(msgIds.filter(i=>i!==id)):setMsgIds([...msgIds,id]);
+        const setTemplateMessage = (m) => {
+            if(m==='sup') setMsgTxt('السلام عليكم،\nتذكير: لديكم تكليف بالإشراف اليوم.\nشكراً.');
+            if(m==='duty') setMsgTxt('السلام عليكم،\nتذكير: لديكم مناوبة اليوم.\nشكراً.');
+        };
+        const sendBulk = (p) => openWa(p, msgTxt);
+
+        return (
+            <div className="max-w-md mx-auto min-h-screen bg-gray-50 pb-20 relative">
+                
+                {/* تقرير الطباعة المخفي */}
+                {printTeacher && (
+                    <div id="printable-area" className="hidden p-8 bg-white text-black">
+                        <div className="text-center border-b-2 border-black pb-4 mb-4">
+                            <h1 className="text-2xl font-bold">{schoolName}</h1>
+                            <p>تقرير المعلم: {printTeacher.name}</p>
+                        </div>
+                        <table className="w-full border-collapse border border-black text-center text-sm">
+                            <thead>
+                                <tr className="bg-gray-100">
+                                    <th className="border border-black p-2">م</th>
+                                    <th className="border border-black p-2">النوع</th>
+                                    <th className="border border-black p-2">التاريخ</th>
+                                    <th className="border border-black p-2">التفاصيل</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {records.filter(r => r.teacherId === printTeacher.id).map((r, i) => (
+                                    <tr key={i}>
+                                        <td className="border border-black p-2">{i+1}</td>
+                                        <td className="border border-black p-2">{r.type === 'late' ? 'تأخر' : r.type}</td>
+                                        <td className="border border-black p-2">{hijriDate(r.date)}</td>
+                                        <td className="border border-black p-2">{r.notes || '-'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+
+                {/* Header */}
+                <header className="bg-teal-700 text-white p-5 rounded-b-3xl shadow-lg no-print">
+                    <div className="flex justify-between items-center">
+                        <div>
+                            <h1 className="text-lg font-bold">{schoolName}</h1>
+                            <p className="text-xs text-teal-200 mt-1">{hijriDate(new Date())}</p>
+                        </div>
+                        <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
+                            <i className="fas fa-user-tie"></i>
+                        </div>
+                    </div>
+                </header>
+
+                <main className="p-4 no-print">
+                    
+                    {/* Dashboard */}
+                    {activeTab === 'dashboard' && (
+                        <div className="space-y-4">
+                            <div className="flex gap-2 justify-center bg-white p-2 rounded-xl shadow-sm">
+                                {['all','month','week','today'].map(k => (
+                                    <button key={k} onClick={()=>setFilter(k)} className={`px-4 py-1 text-xs rounded-full transition-all ${filter===k ? 'bg-teal-600 text-white' : 'text-gray-500'}`}>
+                                        {k==='all'?'الكل':k==='month'?'شهر':k==='week'?'أسبوع':'يوم'}
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="bg-white p-4 rounded-2xl border-r-4 border-amber-400 shadow-sm stat-card">
+                                    <div className="text-amber-500 text-3xl font-bold">{stats.late}</div>
+                                    <div className="text-gray-500 text-xs font-bold mt-1">تأخر</div>
+                                </div>
+                                <div className="bg-white p-4 rounded-2xl border-r-4 border-red-400 shadow-sm stat-card">
+                                    <div className="text-red-500 text-3xl font-bold">{stats.absent}</div>
+                                    <div className="text-gray-500 text-xs font-bold mt-1">غياب</div>
+                                </div>
+                                <div className="bg-white p-4 rounded-2xl border-r-4 border-sky-400 shadow-sm stat-card">
+                                    <div className="text-sky-500 text-3xl font-bold">{stats.perm}</div>
+                                    <div className="text-gray-500 text-xs font-bold mt-1">استئذان</div>
+                                </div>
+                                <div className="bg-white p-4 rounded-2xl border-r-4 border-green-400 shadow-sm stat-card">
+                                    <div className="text-green-500 text-3xl font-bold">{stats.assembly}</div>
+                                    <div className="text-gray-500 text-xs font-bold mt-1">طابور</div>
+                                </div>
+                            </div>
+                            
+                            <div className="bg-white p-4 rounded-2xl shadow-sm">
+                                <h3 className="font-bold text-gray-700 mb-3 text-sm">الأكثر تأخراً (هذا الشهر)</h3>
+                                {topLate.length===0 ? <p className="text-xs text-gray-400">لا يوجد</p> : 
+                                    topLate.map((t,i) => (
+                                        <div key={i} className="flex justify-between p-2 border-b text-sm">
+                                            <span>{t.name}</span>
+                                            <span className="font-bold text-red-500">{t.minutes}د</span>
+                                        </div>
+                                    ))
+                                }
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Entry Form */}
+                    {activeTab === 'entry' && (
+                        <div className="bg-white p-6 rounded-3xl shadow-sm border space-y-5">
+                            <div>
+                                <label className="text-xs font-bold text-gray-500 block mb-2">المعلم</label>
+                                <select className="w-full p-3 bg-gray-50 border-0 rounded-xl font-bold text-gray-700" value={formTeacher} onChange={e=>setFormTeacher(e.target.value)}>
+                                    <option value="">-- اختر --</option>
+                                    {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                                </select>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2">
+                                {[['late','تأخر','clock','amber'], ['absent','غياب','user-times','red'], ['permission','استئذان','door-open','sky'], ['waiting','انتظار','chair','orange'], ['assembly','طابور','flag','green'], ['accountability','إجراء','gavel','purple']].map(([k,l,i,c]) => (
+                                    <button key={k} onClick={()=>setFormType(k)} className={`p-3 rounded-xl border flex flex-col items-center gap-1 transition-all ${formType===k ? `bg-${c}-100 border-${c}-500 text-${c}-900` : 'bg-white text-gray-500'}`}>
+                                        <i className={`fas fa-${i} text-lg`}></i><span className="text-[10px] font-bold">{l}</span>
+                                    </button>
+                                ))}
+                            </div>
+
+                            {(formType === 'late' || formType === 'waiting') && (
+                                <div className="flex gap-2">
+                                    <div className="flex-1"><label className="text-[10px] font-bold text-gray-400">الحصة</label><select className="w-full p-2 bg-gray-50 rounded-lg" value={formSession} onChange={e=>setFormSession(e.target.value)}>{[1,2,3,4,5,6,7,8].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
+                                    {formType === 'late' && <div className="flex-1"><label className="text-[10px] font-bold text-gray-400">دقائق</label><input type="number" className="w-full p-2 bg-gray-50 rounded-lg" value={formMinutes} onChange={e=>setFormMinutes(e.target.value)}/></div>}
+                                </div>
+                            )}
+
+                            {formType === 'permission' && <div><label className="text-[10px] font-bold text-gray-400">المدة (دقائق)</label><input type="number" className="w-full p-3 bg-gray-50 rounded-lg" value={formMinutes} onChange={e=>setFormMinutes(e.target.value)}/></div>}
+
+                            {formType === 'accountability' && <div><label className="text-[10px] font-bold text-gray-400">النوع</label><select className="w-full p-3 bg-gray-50 rounded-lg" value={formAcc} onChange={e=>setFormAcc(e.target.value)}>{accountabilityOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>}
+
+                            <div className="flex gap-2">
+                                <input type="date" className="flex-1 p-3 bg-gray-50 rounded-xl text-sm" value={formDate} onChange={e=>setFormDate(e.target.value)}/>
+                            </div>
+                            
+                            <input type="text" className="w-full p-3 bg-gray-50 rounded-xl text-sm" placeholder="ملاحظات..." value={formNotes} onChange={e=>setFormNotes(e.target.value)}/>
+
+                            <button onClick={saveRecord} className="w-full bg-teal-600 text-white py-4 rounded-xl font-bold shadow-lg active:scale-95 transition-transform">حفظ</button>
+                        </div>
+                    )}
+
+                    {/* Reports */}
+                    {activeTab === 'reports' && (
+                        <div className="space-y-4">
+                            <input className="w-full p-3 bg-white border rounded-xl text-sm shadow-sm" placeholder="بحث..." value={search} onChange={e=>setSearch(e.target.value)}/>
+                            
+                            {filteredTeachers.map(t => {
+                                const s = getTeacherStats(t.id);
+                                return (
+                                    <div key={t.id} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <div>
+                                                <h3 className="font-bold text-gray-800">{t.name}</h3>
+                                                <span className="text-xs text-gray-400">{t.phone}</span>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button onClick={()=>handlePrint(t)} className="w-8 h-8 bg-gray-100 rounded-full text-gray-600"><i className="fas fa-print"></i></button>
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="flex gap-2 text-xs mb-2">
+                                            <span className="bg-amber-100 px-2 py-1 rounded text-amber-700">تأخر: {s.late}</span>
+                                            <span className="bg-red-100 px-2 py-1 rounded text-red-700">غياب: {s.absent}</span>
+                                            <span className="bg-orange-100 px-2 py-1 rounded text-orange-700">انتظار: {s.waiting}</span>
+                                        </div>
+
+                                        <div className="mt-2 space-y-2">
+                                            {records.filter(r => r.teacherId === t.id && checkDate(r.date)).sort((a,b)=>new Date(b.date)-new Date(a.date)).map(r => (
+                                                <div key={r.id} className="flex justify-between items-center bg-gray-50 p-2 rounded-lg border border-gray-100">
+                                                    <div className="flex flex-col">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${r.type==='late'?'bg-amber-100 text-amber-700':r.type==='absent'?'bg-red-100 text-red-700':'bg-gray-200 text-gray-700'}`}>
+                                                                {r.type === 'late' ? 'تأخر' : r.type === 'absent' ? 'غياب' : r.type === 'waiting' ? 'انتظار' : r.type}
+                                                            </span>
+                                                            <span className="text-[10px] text-gray-400">{hijriDate(r.date)}</span>
+                                                        </div>
+                                                        {(r.type==='late'||r.type==='waiting') && <span className="text-[10px] text-gray-500 mt-1">حصة: {r.sessionNumber} {r.minutes?`(${r.minutes}د)`:''}</span>}
+                                                    </div>
+                                                    <div className="flex gap-2">
+                                                        <button onClick={()=>sendRecWa(r)} className="text-green-500"><i className="fab fa-whatsapp"></i></button>
+                                                        <button onClick={()=>setEditRec(r)} className="text-blue-400"><i className="fas fa-pen"></i></button>
+                                                        <button onClick={()=>deleteRecord(r.id)} className="text-red-400"><i className="fas fa-trash"></i></button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {/* Messages */}
+                    {activeTab === 'messages' && (
+                        <div className="bg-white p-5 rounded-2xl shadow-sm space-y-4">
+                            <h2 className="font-bold text-gray-700">الرسائل الجماعية</h2>
+                            
+                            <div className="flex gap-2">
+                                <button onClick={()=>{setMsgTxt('السلام عليكم،\nلديكم تكليف بالإشراف اليوم.\nشكراً.');}} className="flex-1 bg-blue-50 text-blue-600 border border-blue-200 py-2 rounded-lg text-xs font-bold">رسالة إشراف</button>
+                                <button onClick={()=>{setMsgTxt('السلام عليكم،\nلديكم مناوبة اليوم.\nشكراً.');}} className="flex-1 bg-indigo-50 text-indigo-600 border border-indigo-200 py-2 rounded-lg text-xs font-bold">رسالة مناوبة</button>
+                            </div>
+
+                            <div className="max-h-40 overflow-y-auto space-y-1 bg-gray-50 p-2 rounded-xl">
+                                {teachers.map(t => (
+                                    <div key={t.id} onClick={()=>{
+                                        const exists = msgIds.includes(t.id);
+                                        setMsgIds(exists ? msgIds.filter(id=>id!==t.id) : [...msgIds, t.id]);
+                                    }} className={`p-2 rounded cursor-pointer text-xs flex justify-between ${msgIds.includes(t.id) ? 'bg-teal-100 text-teal-800' : ''}`}>
+                                        <span>{t.name}</span>
+                                        {msgIds.includes(t.id) && <i className="fas fa-check"></i>}
+                                    </div>
+                                ))}
+                            </div>
+
+                            <textarea className="w-full p-3 bg-gray-50 rounded-xl text-sm h-24" placeholder="نص الرسالة..." value={msgTxt} onChange={e=>setMsgTxt(e.target.value)}></textarea>
+
+                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                <p className="text-xs text-gray-400 mb-2">اضغط للإرسال:</p>
+                                {msgIds.map(id => {
+                                    const t = teachers.find(x => x.id === id);
+                                    return (
+                                        <button key={id} onClick={()=>openWa(t.phone, msgTxt)} className="w-full flex justify-between items-center p-3 bg-green-50 text-green-800 rounded-xl text-sm font-bold border border-green-100 hover:bg-green-100">
+                                            <span>{t.name}</span>
+                                            <i className="fab fa-whatsapp"></i>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Settings */}
+                    {activeTab === 'settings' && (
+                        <div className="space-y-4">
+                            <div className="bg-white p-5 rounded-2xl shadow-sm">
+                                <h3 className="font-bold text-gray-700 mb-2">المدرسة</h3>
+                                <input className="w-full p-3 border rounded-xl" value={schoolName} onChange={e=>setSchoolName(e.target.value)}/>
+                            </div>
+                            <div className="bg-white p-5 rounded-2xl shadow-sm">
+                                <h3 className="font-bold text-gray-700 mb-2">إضافة معلم</h3>
+                                <div className="flex gap-2">
+                                    <input className="w-1/3 p-2 border rounded-lg text-sm" placeholder="الاسم" value={newName} onChange={e=>setNewName(e.target.value)}/>
+                                    <input className="flex-1 p-2 border rounded-lg text-sm" placeholder="الجوال" value={newPhone} onChange={e=>setNewPhone(e.target.value)}/>
+                                    <button onClick={addTeacher} className="bg-teal-600 text-white px-3 rounded-lg">+</button>
+                                </div>
+                                <div className="mt-4 space-y-2 max-h-40 overflow-y-auto">
+                                    {teachers.map(t=><div key={t.id} className="flex justify-between bg-gray-50 p-2 rounded text-xs"><span>{t.name}</span><button onClick={()=>deleteTeacher(t.id)} className="text-red-500">×</button></div>)}
+                                </div>
+                            </div>
+                            <div className="bg-white p-5 rounded-2xl shadow-sm space-y-2">
+                                <h3 className="font-bold text-gray-700">بيانات</h3>
+                                <button onClick={exportExcel} className="w-full bg-green-600 text-white py-3 rounded-xl font-bold shadow">تصدير إكسل (XLSX)</button>
+                                <input type="file" ref={excelRef} onChange={(e)=>{ /* Excel Import Logic */ }} className="hidden" />
+                                <button onClick={()=>excelRef.current.click()} className="w-full bg-teal-500 text-white py-3 rounded-xl font-bold shadow">استيراد معلمين</button>
+                            </div>
+                        </div>
+                    )}
+                </main>
+
+                {/* Edit Modal */}
+                {editRec && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay p-4">
+                        <div className="bg-white p-6 rounded-3xl w-full max-w-sm">
+                            <h3 className="font-bold mb-4">تعديل</h3>
+                            <div className="space-y-3">
+                                <input type="number" className="w-full p-3 border rounded-xl" value={editRec.minutes} onChange={e=>setEditRec({...editRec, minutes:e.target.value})} placeholder="دقائق"/>
+                                <input type="date" className="w-full p-3 border rounded-xl" value={editRec.date} onChange={e=>setEditRec({...editRec, date:e.target.value})}/>
+                                <div className="flex gap-2">
+                                    <button onClick={updateRecord} className="flex-1 bg-teal-600 text-white py-2 rounded-xl">حفظ</button>
+                                    <button onClick={()=>setEditRec(null)} className="flex-1 bg-gray-200 py-2 rounded-xl">إلغاء</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <nav className="fixed bottom-0 left-0 right-0 bg-white border-t p-2 flex justify-around pb-safe z-40 text-[10px] font-bold text-gray-400">
+                    {['dashboard','entry','reports','messages','settings'].map(t => (
+                        <button key={t} onClick={()=>setActiveTab(t)} className={`flex flex-col items-center w-1/5 ${activeTab===t?'text-teal-600':''}`}>
+                            <i className={`fas fa-${t==='dashboard'?'home':t==='entry'?'plus-circle':t==='reports'?'chart-pie':t==='messages'?'envelope':'cog'} text-xl mb-1`}></i>
+                            <span>{t==='dashboard'?'الرئيسية':t==='entry'?'تسجيل':t==='reports'?'تقارير':t==='messages'?'رسائل':'إعدادات'}</span>
+                        </button>
+                    ))}
+                </nav>
+            </div>
+        );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+
+</script>
+</body>
+</html>
